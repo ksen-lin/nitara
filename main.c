@@ -1,29 +1,27 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/kallsyms.h> // kallsyms_lookup_name()
+#include <linux/kallsyms.h>  // kallsyms_lookup_name(), ~on_each_sym() 
 #include <linux/fs.h>        // vfs_read()
-#include <asm/uaccess.h>    // set_fs(), get_ds()
+#include <asm/uaccess.h>     // set_fs(), get_ds()
 #include <linux/string.h>    // strlen()
+#include <linux/version.h>
 
 /* nbytes of prologue to be shown when DEBUG */
-#define NBYTES 8
+#ifdef DEBUG
+	#define NBYTES 8
+#endif
 #define MODS_FILE "/etc/modules"
+#define N_SYMS 10
 
-
-#define N_REPT_SYMS   7
-const char *rept_syms[]   = { "vfs_read", "filldir",
-                              "fillonedir", "inet_ioctl",
-                              "tcp4_seq_show", "udp4_seq_show" ,
-                              "kallsyms_lookup_name" };
+const char *syms[]   = { "vfs_read", "vfs_readdir", "filldir",
+	                     "fillonedir", "inet_ioctl", "tcp4_seq_show",
+	                     "udp4_seq_show", "tcp_sendmsg",
+                         "tcp_push_one", "kallsyms_lookup_name" };
 
 unsigned long  func_addr = 0xCACACACACBCBCBCB;
 unsigned char  i, j, count, *byte;
 
-int nitara_init(void)
-{
-    printk("\nnitara: init_module().\n");
-    return 0;
-}
+
 
 /* checks the 1st byte of func for jmp instruction */
 int splicechk(void * func, const char * name)
@@ -38,6 +36,17 @@ int splicechk(void * func, const char * name)
      }
     /* TODO: maybe checking for the place to go after jmp*/
 }
+
+
+loff_t get_i_size(struct file * f)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0)
+    return f->f_mapping->host->i_size;
+#else
+    return f->f_inode->i_size;
+#endif
+}
+
 
 /* checks for hidden contents by comparing      *
  * length and size of MODS_FILE (/etc/modules)  */
@@ -54,15 +63,15 @@ int modsfile_chk(void)
     }
     
     /* get the true filesize */
-    f_len = (long)f->f_inode->i_size;
+    f_len = (long)get_i_size(f);
+    
     fs = get_fs();
     set_fs(get_ds());
     
     memset(buf, 0, 360);
     /* read the file via file operations according to f_len */
     f_count = f->f_op->read(f, buf, f_len, &f->f_pos);
-    
-    
+        
     if( f_count > 0 ){
          buf[f_count+1] = '\0';
 #ifdef DEBUG
@@ -99,53 +108,74 @@ int modsfile_chk(void)
         printk("nitara ***WARN***: %s is of %li bytes but only %li (%li bytes less) "
                "can be read via vfs_read(). possible contents hiding\n", 
                 MODS_FILE, f_len, f_vfs_count, (f_len - f_vfs_count) );
+        filp_close( f, NULL );
+		return 1;
 	}else{
 		printk("nitara: %s is of %lu bytes indeed\n", MODS_FILE, f_count);
+		filp_close( f, NULL );
+		return 0;
     }
-    filp_close( f, NULL );
-    
-    return 1;
+
 }
 
-/* checking the for Reptile LKM */
-void reptile_chk(void)
+
+/* replacement for kallsyms_lookup_name() which is not yet being  *
+ * exported in ~2.6.32 kernel. taken from github.com/milabs/khook */
+
+static int kh_lookup_cb(long data[], const char *name, void *module, long addr)
+{
+	int i = 0; while (!module && (((const char *)data[0]))[i] == name[i]) {
+		if (!name[i++]) return !!(data[1] = addr);
+	} return 0;
+}
+
+static void *kh_lookup_name(const char *name)
+{
+	long data[2] = { (long)name, 0 };
+	kallsyms_on_each_symbol((void *)kh_lookup_cb, data);
+	return (void *)data[1];
+}	
+
+
+void lkm_chk(void)
 {
     count = 0;
-    for(i=0; i<N_REPT_SYMS; i+=1){
-        func_addr = kallsyms_lookup_name(rept_syms[i]);
+    for(i=0; i<N_SYMS; i+=1){
+        func_addr = (unsigned long)kh_lookup_name(syms[i]);
+        
         if (func_addr){
             byte = (unsigned char *) func_addr;
-        #ifdef DEBUG
+#ifdef DEBUG
             printk("nitara DEBUG: func_addr is 0x%p\nnitara: prologue bytes: ",
                     (void *)func_addr);
             for (j = 0; j<NBYTES; j+=1){
                 printk("0x%02x ", 0xFF&(char)(*(byte+j)));
             }
             printk("\n");
-        #endif
-            count += splicechk((void *) func_addr, rept_syms[i]);
+#endif
+            count += splicechk((void *) func_addr, syms[i]);
         }
-      #ifdef DEBUG
-        else printk("nitara DEBUG: function %s() not found\n", rept_syms[i]);
-      #endif
+#ifdef DEBUG
+        else printk("nitara DEBUG: function %s() not found\n", syms[i]);
+#endif
     }
     
     if (modsfile_chk()) count += 1;
        
-    if (count > N_REPT_SYMS/2)
-        printk("nitara: %s: Reptile LKM may reside\n", __func__);
+    if (count > 0)
+        printk("nitara: %s: malicious LKM may reside, vuln.count=%i\n", __func__, count);
+    else
+        printk("nitara: nothing to see here\n");
 }
 
+
 int init_module(void)
-{    
-    int ret;
-    if ((ret = nitara_init()))
-        return ret;
-                    
-    reptile_chk();
-    j = -5;
+{
+	printk("\nnitara: init_module().\n");
+    lkm_chk();
     return -5;
 }
+
 
 void cleanup_module(void)
 {
@@ -153,3 +183,4 @@ void cleanup_module(void)
 }
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("ksen-lin");

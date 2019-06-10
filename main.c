@@ -10,13 +10,16 @@
 #ifdef DEBUG
 	#define NBYTES 8
 #endif
-#define MODS_FILE "/etc/modules"
-#define N_SYMS 10
+// #define MODS_FILE "/etc/modules"
+#define N_SYMS 11
 
-const char *syms[]   = { "vfs_read", "vfs_readdir", "filldir",
+const char *syms[]   = { "vfs_read", "vfs_readdir", "filldir", "proc_readdir",
 	                     "fillonedir", "inet_ioctl", "tcp4_seq_show",
 	                     "udp4_seq_show", "tcp_sendmsg",
                          "tcp_push_one", "kallsyms_lookup_name" };
+#define N_MODS_FILES 4
+const char *mods_files[] = {"/etc/modules", "/etc/rc.local",
+	                        "/etc/inittab", "/etc/rc.d/rc.sysinit" };
 
 unsigned long  func_addr = 0xCACACACACBCBCBCB;
 unsigned char  i, j, count, *byte;
@@ -27,8 +30,8 @@ unsigned char  i, j, count, *byte;
 int splicechk(void * func, const char * name)
 {
      if ( ( (*(char *)func)&0xFF ) == 0xe9 ){
-         printk("nitara ***WARN***: %s() at %p seems to be spliced: "
-                "first byte=0xE9 (jmp opcode)\n", name, func);
+         printk("nitara ***WARN***: %s() at %p seems to be spliced\n",
+                name, func);
          return 1;
      }else{
          printk("nitara: %s() is ok: first byte=0x%02X\n", name, (*(char *)func)&0xFF );
@@ -52,70 +55,84 @@ loff_t get_i_size(struct file * f)
  * length and size of MODS_FILE (/etc/modules)  */
 int modsfile_chk(void)
 {
-    struct       file *f = filp_open(MODS_FILE, O_RDONLY, 0);
-    long         f_len = 0, f_count = 0, f_vfs_count = 0;
-    char         buf[360];
-    mm_segment_t fs;
-    
-    if ( f == NULL ){
-        printk("nitara: %s: error opening %s\n", __func__, MODS_FILE);
-        return -1;
-    }
-    
-    /* get the true filesize */
-    f_len = (long)get_i_size(f);
-    
-    fs = get_fs();
-    set_fs(get_ds());
-    
-    memset(buf, 0, 360);
-    /* read the file via file operations according to f_len */
-    f_count = f->f_op->read(f, buf, f_len, &f->f_pos);
-        
-    if( f_count > 0 ){
-         buf[f_count+1] = '\0';
+	short res=0;
+		
+	struct       file *f = NULL;
+	long         f_len, f_count, f_vfs_count;
+	char         buf[360];
+	mm_segment_t fs;
+		
+	for (i=0; i<N_MODS_FILES; i+=1){
+		
+		f_len = f_count = f_vfs_count = 0;
+		f = filp_open(mods_files[i], O_RDONLY, 0);
+		
+		if ( f == NULL || IS_ERR(f) ){
+			printk("nitara: %s: error opening %s, f=0x%p \n", __func__, mods_files[i], f);
+			continue;
+		}
 #ifdef DEBUG
-         printk("nitara DEBUG: %s: read %lu bytes via file_ops. strlen(buf)=%d,"
-                " f_len=%li, f_count=%li :\n%s###EOF\n",  __func__, (unsigned long)f_count,
-                (int)strlen(buf), f_len, f_count, buf);
-#endif
-    }else{
-        printk("nitara: %s: error reading %s via file_ops, f_count = %li\n",
-               __func__, MODS_FILE, f_count);
-    }
-    
-    /* try to read the file via vfs_read according to f_len.  *
-     * Let's see if we get less this time                     */
-    f->f_op->llseek(f, (loff_t)0, 0);
-    memset(buf, 0, 360);
-    f_vfs_count = vfs_read(f, buf, f_len, &f->f_pos);
-        
-    set_fs(fs);
-    if( f_vfs_count > 0 ){
-         buf[f_vfs_count+1] = '\0';
-#ifdef DEBUG
-         printk("nitara DEBUG: %s: read %lu bytes via vfs_read. strlen(buf)=%d,"
-                " f_len=%li, f_vfs_count=%li, vfs_read at %p :\n%s###EOF\n",
-                 __func__, (unsigned long)f_vfs_count, (int)strlen(buf),
-                 f_len, f_vfs_count, &vfs_read, buf);
-#endif
-    }else{
-        printk("nitara: %s: error reading %s via vfs_read, f_vfs_count = %li\n",
-                __func__, MODS_FILE, f_vfs_count);
-    }
-    
-    if( f_count != f_vfs_count ){
-        printk("nitara ***WARN***: %s is of %li bytes but only %li (%li bytes less) "
-               "can be read via vfs_read(). possible contents hiding\n", 
-                MODS_FILE, f_len, f_vfs_count, (f_len - f_vfs_count) );
-        filp_close( f, NULL );
-		return 1;
-	}else{
-		printk("nitara: %s is of %lu bytes indeed\n", MODS_FILE, f_count);
+		else{
+			printk("nitara: %s: f = \"%s\" opened\n", __func__, mods_files[i]);
+		}
+#endif		
+		/* get the true filesize */
+		f_len = (long)get_i_size(f);
+		
+		fs = get_fs();
+		set_fs(get_ds());
+		
+		memset(buf, 0, 360);
+		/* read the file via file operations according to f_len */
+		f_count = f->f_op->read(f, buf, f_len, &f->f_pos);
+			
+		if( f_count > 0 ){
+			 buf[f_count+1] = '\0';
+	#ifdef DEBUG
+			 printk("nitara DEBUG: %s: read %lu bytes via file_ops. strlen(buf)=%d,"
+					" f_len=%li, f_count=%li :\n%s###EOF\n",  __func__, (unsigned long)f_count,
+					(int)strlen(buf), f_len, f_count, buf);
+	#endif
+		}else{
+			printk("nitara: %s: error reading %s via file_ops, f_count = %li\n",
+				   __func__, mods_files[i], f_count);
+		}
+		
+		/* try to read the file via vfs_read according to f_len.  *
+		 * Let's see if we get less this time                     */
+		f->f_op->llseek(f, (loff_t)0, 0);
+		memset(buf, 0, 360);
+		f_vfs_count = vfs_read(f, buf, f_len, &f->f_pos);
+			
+		set_fs(fs);
+		if( f_vfs_count > 0 ){
+			 buf[f_vfs_count+1] = '\0';
+	#ifdef DEBUG
+			 printk("nitara DEBUG: %s: read %lu bytes via vfs_read. strlen(buf)=%d,"
+					" f_len=%li, f_vfs_count=%li, vfs_read at %p :\n%s###EOF\n",
+					 __func__, (unsigned long)f_vfs_count, (int)strlen(buf),
+					 f_len, f_vfs_count, &vfs_read, buf);
+	#endif
+		}else{
+			printk("nitara: %s: error reading %s via vfs_read, f_vfs_count = %li\n",
+					__func__, mods_files[i], f_vfs_count);
+		}
+		
+		if( f_count != f_vfs_count ){
+			printk("nitara ***WARN***: %s is of %li bytes but only %li (%li bytes less) "
+				   "can be read via vfs_read(). possible contents hiding\n", 
+					mods_files[i], f_len, f_vfs_count, (f_len - f_vfs_count) );
+			res+=1;
+		}else{
+			printk("nitara: %s is of %lu bytes indeed\n", mods_files[i], f_count);
+		}
 		filp_close( f, NULL );
-		return 0;
-    }
-
+		set_fs(fs);
+	} // end loop
+#ifdef DEBUG
+	printk("nitara: found %i vulnerable files\n", res);
+#endif
+	return res;
 }
 
 
